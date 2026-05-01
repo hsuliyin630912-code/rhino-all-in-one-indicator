@@ -1,0 +1,287 @@
+//@version=5
+// =====================================================================
+// 🦏 Rhino All-in-One v1.1 (Killzones + PO3 + 7-Check 三合一)
+// =====================================================================
+// 作者: Rhino Crypto Trader
+// 用途: ICT/SMC 交易者的全功能進場輔助指標
+// 三模塊整合, 節省 TradingView indicator slot
+//   Module 1: Killzones — 5 大時段背景色 + Silver Bullet + 右下面板
+//   Module 2: PO3       — Asia High/Low + Judas Swing + 右上面板
+//   Module 3: 7-Check   — 7 條進場檢查 + 寬鬆/嚴格切換 + 左中面板 + 進場標
+// 預設值: 乾淨模式 (NY Lunch/NY PM/標籤/Asia 線都關)
+// =====================================================================
+indicator("🦏 Rhino All-in-One", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// ----- 🔘 Killzones 開關 -----
+grp_kz = "🔘 Killzones 開關"
+show_asia          = input.bool(true,  "顯示 亞洲盤 (Asia)",              group = grp_kz)
+show_london        = input.bool(true,  "顯示 倫敦盤 (London)",            group = grp_kz)
+show_ny_am         = input.bool(true,  "顯示 紐約上午 (NY AM)",           group = grp_kz)
+show_ny_lunch      = input.bool(false, "顯示 紐約午盤 (NY Lunch)",        group = grp_kz)
+show_ny_pm         = input.bool(false, "顯示 紐約下午 (NY PM)",           group = grp_kz)
+show_silver_bullet = input.bool(true,  "顯示 Silver Bullet (高勝率窗口)", group = grp_kz)
+show_kz_labels     = input.bool(false, "顯示時段標籤 (Asia/London 等浮動標籤)", group = grp_kz)
+show_kz_panel      = input.bool(true,  "顯示 Killzones 面板 (右下)",      group = grp_kz)
+
+// ----- 🎯 PO3 設定 -----
+grp_po3 = "🎯 PO3 設定"
+show_asia_range  = input.bool(false, "顯示 亞洲盤高低點線 (流動性目標)",  group = grp_po3)
+show_judas       = input.bool(true,  "顯示 Judas Swing 標記",            group = grp_po3)
+show_po3_panel   = input.bool(true,  "顯示 PO3 面板 (右上)",             group = grp_po3)
+asia_lookback    = input.int(1, "亞洲盤回看天數", group = grp_po3, minval = 1, maxval = 60)
+asia_start_h     = input.int(20, "亞洲盤開始時 (UTC)", group = grp_po3)
+asia_end_h       = input.int(0,  "亞洲盤結束時 (UTC)", group = grp_po3)
+
+// ----- 📊 7-Check 模式 -----
+grp_chk = "📊 7-Check 模式"
+show_7check         = input.bool(true,  "啟用 7-Check 進場系統",          group = grp_chk)
+show_7check_panel   = input.bool(true,  "顯示 7-Check 面板 (左中)",       group = grp_chk)
+strict_mode         = input.bool(false, "嚴格模式 (close>EMA9>EMA20)",    group = grp_chk, tooltip = "關閉=寬鬆 EMA20>EMA50; 開啟=嚴格 close>EMA9>EMA20")
+sl_atr_mult         = input.float(0.5, "SL = max(結構, ATR × N)", group = grp_chk, step = 0.1, minval = 0.1)
+sl_buffer_pct       = input.float(1.0, "結構 SL Buffer (%)",     group = grp_chk, step = 0.1, minval = 0.0)
+target_rr           = input.float(1.0, "目標 RR (Phase 2 紙上 = 1.0)", group = grp_chk, step = 0.1, minval = 0.5)
+fvg_lookback        = input.int(20, "FVG 回看根數", group = grp_chk, minval = 5, maxval = 100)
+bos_lookback        = input.int(20, "BOS Pivot 回看根數", group = grp_chk, minval = 5, maxval = 100)
+
+// ----- 🎨 配色 -----
+grp_color = "🎨 配色"
+col_asia      = input.color(color.new(color.blue,    90), "Asia",          group = grp_color)
+col_london    = input.color(color.new(color.green,   85), "London",        group = grp_color)
+col_ny_am     = input.color(color.new(color.orange,  80), "NY AM",         group = grp_color)
+col_ny_lunch  = input.color(color.new(color.gray,    90), "NY Lunch",      group = grp_color)
+col_ny_pm     = input.color(color.new(color.purple,  85), "NY PM",         group = grp_color)
+col_silver    = input.color(color.new(color.yellow,  60), "Silver Bullet", group = grp_color)
+col_asia_high = input.color(color.blue,  "Asia High Line", group = grp_color)
+col_asia_low  = input.color(color.red,   "Asia Low Line",  group = grp_color)
+
+hour_utc   = hour(time, "UTC")
+minute_utc = minute(time, "UTC")
+cur_min_total = hour_utc * 60 + minute_utc
+
+is_in_session(start_hour, start_min, end_hour, end_min) =>
+    sess_start = start_hour * 60 + start_min
+    sess_end   = end_hour   * 60 + end_min
+    sess_start <= sess_end ? (cur_min_total >= sess_start and cur_min_total < sess_end) : (cur_min_total >= sess_start or cur_min_total < sess_end)
+
+in_asia_simple   = hour_utc >= 20 and hour_utc < 24
+in_asia          = hour_utc >= asia_start_h or hour_utc < asia_end_h
+in_london        = hour_utc >= 7  and hour_utc < 10
+in_ny_am         = hour_utc >= 12 and hour_utc < 15
+in_ny_lunch      = is_in_session(16, 0, 17, 0)
+in_ny_pm         = is_in_session(17, 0, 20, 0)
+in_ny            = hour_utc >= 12 and hour_utc < 20
+in_london_silver = is_in_session(3,  0, 4,  0)
+in_ny_am_silver  = is_in_session(10, 0, 11, 0)
+in_ny_pm_silver  = is_in_session(14, 0, 15, 0)
+in_any_silver    = in_london_silver or in_ny_am_silver or in_ny_pm_silver
+in_kill_zone = in_london or in_ny_am or in_ny_pm or in_any_silver
+
+bgcolor(show_asia          and in_asia_simple ? col_asia     : na, title = "Asia BG")
+bgcolor(show_london        and in_london      ? col_london   : na, title = "London BG")
+bgcolor(show_ny_am         and in_ny_am       ? col_ny_am    : na, title = "NY AM BG")
+bgcolor(show_ny_lunch      and in_ny_lunch    ? col_ny_lunch : na, title = "NY Lunch BG")
+bgcolor(show_ny_pm         and in_ny_pm       ? col_ny_pm    : na, title = "NY PM BG")
+bgcolor(show_silver_bullet and in_any_silver  ? col_silver   : na, title = "Silver Bullet BG")
+
+new_session(in_now) => in_now and not in_now[1]
+
+f_kz_label(cond, txt, col) =>
+    if show_kz_labels and cond
+        label.new(bar_index, high, txt, style = label.style_label_down, color = col, textcolor = color.white, size = size.small)
+
+f_kz_label(new_session(in_asia_simple),    "🌏 Asia",         color.blue)
+f_kz_label(new_session(in_london),         "🇬🇧 London",      color.green)
+f_kz_label(new_session(in_ny_am),          "🇺🇸 NY AM",       color.orange)
+f_kz_label(new_session(in_london_silver),  "💎 LDN Silver",   color.yellow)
+f_kz_label(new_session(in_ny_am_silver),   "💎 NY AM Silver", color.yellow)
+f_kz_label(new_session(in_ny_pm_silver),   "💎 NY PM Silver", color.yellow)
+
+alertcondition(new_session(in_london),       "London Open Alert",    "🇬🇧 倫敦盤開盤")
+alertcondition(new_session(in_ny_am),        "NY AM Open Alert",     "🇺🇸 紐約上午盤開盤")
+alertcondition(new_session(in_ny_pm_silver), "NY PM Silver Bullet",  "💎 NY PM Silver Bullet 開始")
+
+var table kz_info = table.new(position.bottom_right, 2, 4, bgcolor = color.new(color.black, 70), border_width = 1)
+if barstate.islast and show_kz_panel
+    table.cell(kz_info, 0, 0, "🦏 Killzones",   text_color = color.white)
+    table.cell(kz_info, 1, 0, "v1.1",            text_color = color.white)
+    table.cell(kz_info, 0, 1, "台灣最佳",         text_color = color.yellow)
+    table.cell(kz_info, 1, 1, "20-23",           text_color = color.yellow)
+    table.cell(kz_info, 0, 2, "Silver Bullet",   text_color = color.aqua)
+    table.cell(kz_info, 1, 2, "22-23",           text_color = color.aqua)
+    table.cell(kz_info, 0, 3, "避開時段",         text_color = color.red)
+    table.cell(kz_info, 1, 3, "00-01",           text_color = color.red)
+
+new_asia_start  = in_asia and not in_asia[1]
+asia_just_ended = not in_asia and in_asia[1]
+
+var float asia_high   = na
+var float asia_low    = na
+var line  asia_h_line = na
+var line  asia_l_line = na
+var bool  asia_high_swept = false
+var bool  asia_low_swept  = false
+
+if new_asia_start
+    asia_high := high
+    asia_low  := low
+    asia_high_swept := false
+    asia_low_swept  := false
+else if in_asia
+    asia_high := math.max(nz(asia_high, high), high)
+    asia_low  := math.min(nz(asia_low,  low),  low)
+
+if asia_just_ended and show_asia_range
+    asia_h_line := line.new(bar_index, asia_high, bar_index + 50, asia_high, color = col_asia_high, width = 2, style = line.style_dashed, extend = extend.right)
+    asia_l_line := line.new(bar_index, asia_low,  bar_index + 50, asia_low,  color = col_asia_low,  width = 2, style = line.style_dashed, extend = extend.right)
+    label.new(bar_index, asia_high, "🎯 Asia High (BSL)", style = label.style_label_left, color = color.blue, textcolor = color.white, size = size.small)
+    label.new(bar_index, asia_low,  "🎯 Asia Low (SSL)",  style = label.style_label_left, color = color.red,  textcolor = color.white, size = size.small)
+
+if not in_asia and not na(asia_high) and high > asia_high and not asia_high_swept
+    asia_high_swept := true
+    if not na(asia_h_line)
+        line.set_style(asia_h_line, line.style_solid)
+
+if not in_asia and not na(asia_low) and low < asia_low and not asia_low_swept
+    asia_low_swept := true
+    if not na(asia_l_line)
+        line.set_style(asia_l_line, line.style_solid)
+
+var bool judas_up_done   = false
+var bool judas_down_done = false
+
+if new_asia_start
+    judas_up_done   := false
+    judas_down_done := false
+
+broke_asia_high = in_london and high > asia_high and close < asia_high
+broke_asia_low  = in_london and low  < asia_low  and close > asia_low
+
+if show_judas and broke_asia_high and not judas_up_done and not na(asia_high)
+    label.new(bar_index, high, "🔻 Judas Up\n(預期向下)", style = label.style_label_down, color = color.red, textcolor = color.white, size = size.small)
+    judas_up_done := true
+
+if show_judas and broke_asia_low and not judas_down_done and not na(asia_low)
+    label.new(bar_index, low, "🔺 Judas Down\n(預期向上)", style = label.style_label_up, color = color.green, textcolor = color.white, size = size.small)
+    judas_down_done := true
+
+alertcondition(broke_asia_high and not na(asia_high), "Judas Up Alert",   "🔻 Judas Up — Asia High 假突破")
+alertcondition(broke_asia_low  and not na(asia_low),  "Judas Down Alert", "🔺 Judas Down — Asia Low 假突破")
+
+var table po3_info = table.new(position.top_right, 2, 5, bgcolor = color.new(color.black, 70), border_width = 1)
+if barstate.islast and show_po3_panel
+    table.cell(po3_info, 0, 0, "🦏 PO3 Status", text_color = color.white)
+    table.cell(po3_info, 1, 0, "v1.1",          text_color = color.white)
+    table.cell(po3_info, 0, 1, "Asia High",     text_color = color.aqua)
+    table.cell(po3_info, 1, 1, na(asia_high) ? "—" : str.tostring(asia_high, format.mintick), text_color = color.aqua)
+    table.cell(po3_info, 0, 2, "Asia Low",      text_color = color.red)
+    table.cell(po3_info, 1, 2, na(asia_low)  ? "—" : str.tostring(asia_low,  format.mintick), text_color = color.red)
+    table.cell(po3_info, 0, 3, "Phase",         text_color = color.yellow)
+    cur_phase = in_asia ? "Accumulation" : in_london ? "Manipulation" : in_ny ? "Distribution" : "Off-session"
+    table.cell(po3_info, 1, 3, cur_phase,       text_color = color.yellow)
+    table.cell(po3_info, 0, 4, "Judas",         text_color = color.orange)
+    judas_status = judas_up_done ? "Up ✓" : judas_down_done ? "Down ✓" : "—"
+    table.cell(po3_info, 1, 4, judas_status,    text_color = color.orange)
+
+ema9_d  = request.security(syminfo.tickerid, "D", ta.ema(close, 9),  lookahead = barmerge.lookahead_off)
+ema20_d = request.security(syminfo.tickerid, "D", ta.ema(close, 20), lookahead = barmerge.lookahead_off)
+ema50_d = request.security(syminfo.tickerid, "D", ta.ema(close, 50), lookahead = barmerge.lookahead_off)
+close_d = request.security(syminfo.tickerid, "D", close, lookahead = barmerge.lookahead_off)
+atr14 = ta.atr(14)
+
+chk_session = in_kill_zone
+chk_daily_long  = strict_mode ? (close_d > ema9_d and ema9_d > ema20_d) : (ema20_d > ema50_d)
+chk_daily_short = strict_mode ? (close_d < ema9_d and ema9_d < ema20_d) : (ema20_d < ema50_d)
+chk_liq_long  = asia_low_swept
+chk_liq_short = asia_high_swept
+
+ph = ta.pivothigh(high, bos_lookback, bos_lookback)
+pl = ta.pivotlow(low,  bos_lookback, bos_lookback)
+var float last_ph = na
+var float last_pl = na
+if not na(ph)
+    last_ph := ph
+if not na(pl)
+    last_pl := pl
+chk_bos_long  = not na(last_ph) and close > last_ph
+chk_bos_short = not na(last_pl) and close < last_pl
+
+var bool bull_fvg_recent = false
+var bool bear_fvg_recent = false
+var int  bull_fvg_bar    = na
+var int  bear_fvg_bar    = na
+
+bull_fvg_now = low > high[2]
+bear_fvg_now = high < low[2]
+
+if bull_fvg_now
+    bull_fvg_recent := true
+    bull_fvg_bar    := bar_index
+if bear_fvg_now
+    bear_fvg_recent := true
+    bear_fvg_bar    := bar_index
+
+chk_fvg_long  = bull_fvg_recent and not na(bull_fvg_bar) and (bar_index - bull_fvg_bar) <= fvg_lookback
+chk_fvg_short = bear_fvg_recent and not na(bear_fvg_bar) and (bar_index - bear_fvg_bar) <= fvg_lookback
+
+chk_sl = atr14 > 0
+
+sl_long_struct  = not na(last_pl) ? last_pl * (1.0 - sl_buffer_pct / 100.0) : na
+sl_short_struct = not na(last_ph) ? last_ph * (1.0 + sl_buffer_pct / 100.0) : na
+sl_atr          = atr14 * sl_atr_mult
+sl_long  = not na(sl_long_struct)  ? math.min(sl_long_struct,  close - sl_atr) : (close - sl_atr)
+sl_short = not na(sl_short_struct) ? math.max(sl_short_struct, close + sl_atr) : (close + sl_atr)
+
+sl_dist_long  = close - sl_long
+sl_dist_short = sl_short - close
+chk_rr_long  = sl_dist_long  > 0
+chk_rr_short = sl_dist_short > 0
+
+score_long = (chk_session ? 1 : 0) + (chk_daily_long ? 1 : 0) + (chk_liq_long ? 1 : 0) + (chk_bos_long ? 1 : 0) + (chk_fvg_long ? 1 : 0) + (chk_sl ? 1 : 0) + (chk_rr_long ? 1 : 0)
+score_short = (chk_session ? 1 : 0) + (chk_daily_short ? 1 : 0) + (chk_liq_short ? 1 : 0) + (chk_bos_short ? 1 : 0) + (chk_fvg_short ? 1 : 0) + (chk_sl ? 1 : 0) + (chk_rr_short ? 1 : 0)
+
+is_perfect_long  = score_long  == 7
+is_perfect_short = score_short == 7
+
+plotshape(show_7check and is_perfect_long  and not is_perfect_long[1],  title = "🚀 LONG",  text = "🚀 LONG",  style = shape.triangleup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.normal)
+plotshape(show_7check and is_perfect_short and not is_perfect_short[1], title = "🚨 SHORT", text = "🚨 SHORT", style = shape.triangledown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.normal)
+
+alertcondition(is_perfect_long  and not is_perfect_long[1],  "7/7 LONG Alert",  "🚀 7/7 LONG — 全條件達標!")
+alertcondition(is_perfect_short and not is_perfect_short[1], "7/7 SHORT Alert", "🚨 7/7 SHORT — 全條件達標!")
+
+f_dot(cond) => cond ? "🟢" : "⚪"
+
+var table chk_info = table.new(position.middle_left, 3, 10, bgcolor = color.new(color.black, 70), border_width = 1)
+if barstate.islast and show_7check and show_7check_panel
+    mode_str = strict_mode ? "嚴格" : "寬鬆"
+    table.cell(chk_info, 0, 0, "🦏 7-Check", bgcolor = color.new(color.blue, 50), text_color = color.white)
+    table.cell(chk_info, 1, 0, "LONG",       bgcolor = color.new(color.blue, 50), text_color = color.white)
+    table.cell(chk_info, 2, 0, "SHORT",      bgcolor = color.new(color.blue, 50), text_color = color.white)
+    table.cell(chk_info, 0, 1, "1.時段",      text_color = color.white)
+    table.cell(chk_info, 1, 1, f_dot(chk_session), text_color = color.white)
+    table.cell(chk_info, 2, 1, f_dot(chk_session), text_color = color.white)
+    table.cell(chk_info, 0, 2, "2.Daily(" + mode_str + ")", text_color = color.white)
+    table.cell(chk_info, 1, 2, f_dot(chk_daily_long),  text_color = color.white)
+    table.cell(chk_info, 2, 2, f_dot(chk_daily_short), text_color = color.white)
+    table.cell(chk_info, 0, 3, "3.流動性",   text_color = color.white)
+    table.cell(chk_info, 1, 3, f_dot(chk_liq_long),  text_color = color.white)
+    table.cell(chk_info, 2, 3, f_dot(chk_liq_short), text_color = color.white)
+    table.cell(chk_info, 0, 4, "4.BOS",      text_color = color.white)
+    table.cell(chk_info, 1, 4, f_dot(chk_bos_long),  text_color = color.white)
+    table.cell(chk_info, 2, 4, f_dot(chk_bos_short), text_color = color.white)
+    table.cell(chk_info, 0, 5, "5.FVG",      text_color = color.white)
+    table.cell(chk_info, 1, 5, f_dot(chk_fvg_long),  text_color = color.white)
+    table.cell(chk_info, 2, 5, f_dot(chk_fvg_short), text_color = color.white)
+    table.cell(chk_info, 0, 6, "6.SL(ATR)",  text_color = color.white)
+    table.cell(chk_info, 1, 6, f_dot(chk_sl), text_color = color.white)
+    table.cell(chk_info, 2, 6, f_dot(chk_sl), text_color = color.white)
+    table.cell(chk_info, 0, 7, "7.RR(" + str.tostring(target_rr, "#.#") + ")", text_color = color.white)
+    table.cell(chk_info, 1, 7, f_dot(chk_rr_long),  text_color = color.white)
+    table.cell(chk_info, 2, 7, f_dot(chk_rr_short), text_color = color.white)
+    table.cell(chk_info, 0, 8, "Score",      bgcolor = color.new(color.gray, 50), text_color = color.white)
+    table.cell(chk_info, 1, 8, str.tostring(score_long)  + "/7", bgcolor = is_perfect_long  ? color.new(color.green, 30) : color.new(color.gray, 70), text_color = color.white)
+    table.cell(chk_info, 2, 8, str.tostring(score_short) + "/7", bgcolor = is_perfect_short ? color.new(color.red,   30) : color.new(color.gray, 70), text_color = color.white)
+    signal_str = is_perfect_long ? "🚀 LONG" : is_perfect_short ? "🚨 SHORT" : "⏸ WAIT"
+    signal_col = is_perfect_long ? color.green : is_perfect_short ? color.red : color.gray
+    table.cell(chk_info, 0, 9, "Signal",     bgcolor = color.new(color.gray, 50), text_color = color.white)
+    table.cell(chk_info, 1, 9, signal_str, bgcolor = color.new(signal_col, 30), text_color = color.white)
+    table.cell(chk_info, 2, 9, "RR " + str.tostring(target_rr, "#.#"), text_color = color.white)
